@@ -1,0 +1,230 @@
+---
+title: "DMD_vs_Healthy_Muscle"
+author: "Kobe Ikegami"
+date: "2023-10-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+1
+```{r}
+library(SeuratObject)
+library(Seurat)
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(tidyverse)
+```
+
+```{r warning=FALSE}
+#Import data and create objects: for each sample
+dmd.data <- Read10X(data.dir = "/Users/ikegamik/Documents/kikegami/side_projects/tlr7_hunt/dmd")
+cntl.data <- Read10X(data.dir = "/Users/ikegamik/Documents/kikegami/side_projects/tlr7_hunt/cntl")
+
+dmd <- CreateSeuratObject(counts = dmd.data, project = "dmd", min.cells = 3, min.features = 200)
+
+cntl <- CreateSeuratObject(counts = cntl.data, project = "cntl", min.cells = 3, min.features = 200)
+
+
+```
+
+Searches for mitochondrial RNA based on the "Mt" tag (human = "MT" or mouse = "mt")
+```{r}
+dmd[["percent.mt"]] <- PercentageFeatureSet(dmd, pattern = "^MT-")
+cntl[["percent.mt"]] <- PercentageFeatureSet(cntl, pattern = "^MT-")
+```
+
+
+```{r}
+#plot counts for rna, features, and mitochondrial RNA to begin filtering out outlier cells
+plot1N <- FeatureScatter(dmd, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2N <- FeatureScatter(cntl, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot1N + plot2N
+plot1N <- FeatureScatter(dmd, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot2N <- FeatureScatter(cntl, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1N + plot2N
+
+VlnPlot(dmd, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(cntl, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+```
+
+```{r}
+#APPLY FILTERS
+dmd_sub <- subset(dmd, subset = nFeature_RNA < 2000 & nFeature_RNA > 200 & nCount_RNA < 4000 & percent.mt < 16)
+cntl_sub <- subset(cntl, subset = nFeature_RNA < 1500 & nFeature_RNA > 200 & nCount_RNA < 3200 & percent.mt < 16)
+
+```
+
+```{r}
+#Replot filtered data and see if stricter thresholds are necessary
+plot1N <- FeatureScatter(dmd_sub, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2N <- FeatureScatter(cntl_sub, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot1N + plot2N
+plot1N <- FeatureScatter(dmd_sub, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot2N <- FeatureScatter(cntl_sub, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1N + plot2N
+
+VlnPlot(dmd_sub, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(cntl_sub, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+```
+normalize data and model mean variance in cell expression. Then do differential expression within treatments to find DE features
+```{r warning=FALSE}
+dmd_sub <- NormalizeData(dmd_sub)
+cntl_sub <- NormalizeData(cntl_sub)
+
+dmd_sub <- FindVariableFeatures(dmd_sub, selection.method = "vst", nfeatures = 2000)
+cntl_sub <- FindVariableFeatures(cntl_sub, selection.method = "vst", nfeatures = 2000)
+
+top10N <- head(VariableFeatures(dmd_sub), 10)
+top10S <- head(VariableFeatures(cntl_sub), 10)
+
+plot1N <- VariableFeaturePlot(dmd_sub)
+plot2N <- LabelPoints(plot = plot1N, points = top10N, repel = TRUE, xnudge = 0, ynudge = 0)
+plot1S <- VariableFeaturePlot(cntl_sub)
+plot2S <- LabelPoints(plot = plot1S, points = top10S, repel = TRUE, xnudge = 0, ynudge = 0)
+
+plot2N
+plot2S
+
+```
+
+**Integration**
+
+Integrating DMD and Control treatments. This corrects batch effect and allows cluster analysis of all data
+
+```{r results='hide'}
+objlist <- list(dmd_sub, cntl_sub)
+features <- SelectIntegrationFeatures(object.list = objlist)
+muscle.anchors <- FindIntegrationAnchors(object.list = objlist, anchor.features = features)
+muscle.combined <- IntegrateData(anchorset = muscle.anchors)
+```
+
+
+Scale data, run a PCA, creat umap/cluster cells basd on expression profiles
+```{r results='hide'}
+DefaultAssay(muscle.combined) <- "integrated"
+muscle.combined <- ScaleData(muscle.combined, verbose = FALSE)
+muscle.combined <- RunPCA(muscle.combined, npcs = 7, verbose = FALSE)
+muscle.combined <- RunUMAP(muscle.combined, reduction = "pca", dims = 1:7)
+muscle.combined <- FindNeighbors(muscle.combined, reduction = "pca", dims = 1:7)
+muscle.combined <- FindClusters(muscle.combined, resolution = 0.3)
+```
+#Check Dimensions to ensure we include as few as possible to reduce cluster number, including only significant dimensional factors
+```{r}
+#muscle.combined <- JackStraw(muscle.combined, num.replicate = 100)
+#muscle.combined <- ScoreJackStraw(muscle.combined, dims = 1:8)
+
+#JackStrawPlot(muscle.combined, dims = 1:8)
+ElbowPlot(muscle.combined)
+```
+
+```{r results='hide'}
+DefaultAssay(dmd_sub) <- "RNA"
+dmd_sub <- ScaleData(dmd_sub, verbose = FALSE)
+dmd_sub <- RunPCA(dmd_sub, npcs = 8, verbose = FALSE)
+dmd_sub <- RunUMAP(dmd_sub, reduction = "pca", dims = 1:8)
+dmd_sub <- FindNeighbors(dmd_sub, reduction = "pca", dims = 1:8)
+dmd_sub <- FindClusters(dmd_sub, resolution = 0.3)
+```
+```{r results='hide'}
+DefaultAssay(cntl_sub) <- "RNA"
+cntl_sub <- ScaleData(cntl_sub, verbose = FALSE)
+cntl_sub <- RunPCA(cntl_sub, npcs = 8, verbose = FALSE)
+cntl_sub <- RunUMAP(cntl_sub, reduction = "pca", dims = 1:8)
+cntl_sub <- FindNeighbors(cntl_sub, reduction = "pca", dims = 1:8)
+cntl_sub <- FindClusters(cntl_sub, resolution = 0.3)
+```
+
+UMAP plotting. Pt.size is just the size of the dots. More cells = lower pt.size
+```{r}
+p0 = DimPlot(muscle.combined, reduction = "umap", split.by = "orig.ident", pt.size = 0.5)
+p1 <- DimPlot(muscle.combined, reduction = "umap", group.by = "orig.ident", pt.size = 0.5)
+p2 <- DimPlot(muscle.combined, reduction = "umap", label = TRUE, repel = TRUE, pt.size = 0.5)
+p1 + p2
+p2
+p0
+```
+```{r}
+p1 <- DimPlot(dmd_sub, reduction = "umap", group.by = "orig.ident", pt.size = 0.5)
+p2 <- DimPlot(dmd_sub, reduction = "umap", label = TRUE, repel = TRUE, pt.size = 0.5)
+p1 + p2
+p3 <- DimPlot(cntl_sub, reduction = "umap", group.by = "orig.ident", pt.size = 0.5)
+p4 <- DimPlot(cntl_sub, reduction = "umap", label = TRUE, repel = TRUE, pt.size = 0.5)
+p3 + p4
+
+```
+
+
+Find conserved markers across per cluster the two data sets and saving them to a cluster variable. This ranks the most differentially expressed genes per integrated cluster ao that the list can be used to characterize cell clusters using GTEx or CellKb SC expression multi-gene sc query
+
+```{r}
+DefaultAssay(muscle.combined) <- "RNA"
+cluster0.markers <- FindConservedMarkers(muscle.combined, ident.1 = 0, grouping.var = "orig.ident", verbose = FALSE)
+cluster1.markers <- FindConservedMarkers(muscle.combined, ident.1 = 1, grouping.var = "orig.ident", verbose = FALSE)
+cluster2.markers <- FindConservedMarkers(muscle.combined, ident.1 = 2, grouping.var = "orig.ident", verbose = FALSE)
+cluster3.markers <- FindConservedMarkers(muscle.combined, ident.1 = 3, grouping.var = "orig.ident", verbose = FALSE)
+cluster4.markers <- FindConservedMarkers(muscle.combined, ident.1 = 4, grouping.var = "orig.ident", verbose = FALSE)
+cluster5.markers <- FindConservedMarkers(muscle.combined, ident.1 = 5, grouping.var = "orig.ident", verbose = FALSE)
+cluster6.markers <- FindConservedMarkers(muscle.combined, ident.1 = 6, grouping.var = "orig.ident", verbose = FALSE)
+cluster7.markers <- FindConservedMarkers(muscle.combined, ident.1 = 7, grouping.var = "orig.ident", verbose = FALSE)
+cluster8.markers <- FindConservedMarkers(muscle.combined, ident.1 = 8, grouping.var = "orig.ident", verbose = FALSE)
+cluster9.markers <- FindConservedMarkers(muscle.combined, ident.1 = 9, grouping.var = "orig.ident", verbose = FALSE)
+cluster10.markers <- FindConservedMarkers(muscle.combined, ident.1 = 10, grouping.var = "orig.ident", verbose = FALSE)
+```
+
+Plot canonical cell-type gene marker expression to characterize cell clusters, confirm with GTEx Query of conserved cluster markers
+```{r}
+
+f1 = FeaturePlot(muscle.combined, split.by = 'orig.ident', features = c("TLR7"))
+f1
+
+#ggsave("/Users/ikegamik/Documents/kikegami/side_projects/tlr7_hunt/figs/homo/homo_tlr7_split_fp.png", plot = last_plot(), width = 7, height = 5, units = "in")
+```
+
+```{r}
+FeaturePlot(muscle.combined, features = c("TLR7"))
+#FeaturePlot(muscle.combined, features = c("NFKB1", 'CCL2', 'DMD', 'RELA'))
+ggsave("/Users/ikegamik/Documents/kikegami/side_projects/tlr7_hunt/homo_int_tlr7.png", plot = last_plot(), width = 7, height = 5, units = "in")
+```
+
+```{r}
+p10 = FeaturePlot(muscle.combined, features = c("PTPRC", 'TTN', 'ADIPOQ', 'DCN','PAX7', 'MYH11', 'PTPRB', 'MYH3'))
+ggsave("/Users/ikegamik/Documents/kikegami/side_projects/tlr7_hunt/homo_celltyping.png", plot = last_plot(), width = 7, height = 5, units = "in")
+```
+
+```{R}
+new_cluster_ids = c("Myofibers/blasts", 'Myofibers/blasts', 'Fibroblasts', 'Myofibers', 'Endothelial','Satellite', 'Immune' , 'Smooth muscle', 'Immune', 'Adipocytes', 'Myoblasts')
+names(new_cluster_ids) <- levels(muscle.combined)
+muscle.combined <- RenameIdents(muscle.combined, new_cluster_ids)
+```
+
+```{r}
+DimPlot(muscle.combined, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+ggsave("/Users/ikegamik/Documents/kikegami/side_projects/tlr7_hunt/homo_int_clusters.png", plot = last_plot(), width = 7, height = 5, units = "in")
+```
+```{r}
+DimPlot(muscle.combined, reduction = "umap", split.by = "orig.ident", pt.size = 0.5)
+ggsave("/Users/ikegamik/Documents/kikegami/side_projects/tlr7_hunt/homo_all_treat_clusters.png", plot = last_plot(), width = 7, height = 5, units = "in")
+```
+
+```{r}
+#FeaturePlot(dmd_sub, features = c("TLR7"))
+#FeaturePlot(dmd_sub, features = c('TTN', 'ADIPOQ', 'DCN', 'PAX7', 'MYH11', 'PTPRB', 'MYH3'))
+#FeaturePlot(dmd_sub, features = c("NFKB1", 'CCL2', 'DMD', 'RELA'))
+#FeaturePlot(dmd_sub, features = c('NFKB1'))
+#FeaturePlot(dmd_sub, features = c("TLR2", 'TLR4', 'TLR7', 'TLR9'))
+#VlnPlot(muscle.combined, group.by = "orig.ident", features = c("TLR7", 'NFKB1', 'DMD'))
+#VlnPlot(dmd_sub, features = c("TLR7", 'NFKB1', 'DMD'))
+VlnPlot(muscle.combined, group.by = "orig.ident", features = c("TLR7", 'NFKB1', 'IL1B', 'TNF', 'CCL2'))
+ggsave("/Users/ikegamik/Documents/kikegami/side_projects/tlr7_hunt/homo_vln_plot.png", plot = last_plot(), width = 7, height = 5, units = "in")
+
+```
+
+```{r}
+FeaturePlot(cntl_sub, features = c("TLR7", 'TTN', 'ADIPOQ', 'DCN', 'PAX7', 'MYH11', 'PTPRB', 'MYH3'))
+FeaturePlot(cntl_sub, features = c("TLR2", 'TLR4', 'TLR7', 'TLR9'))
+```
